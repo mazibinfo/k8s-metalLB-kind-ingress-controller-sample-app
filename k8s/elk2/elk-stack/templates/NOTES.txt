@@ -1,0 +1,47 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your ELK Stack has been deployed to the {{ .Values.global.namespace }} namespace.
+
+Components deployed:
+{{- if .Values.elasticsearch.enabled }}
+  ✓ Elasticsearch
+{{- end }}
+{{- if .Values.kibana.enabled }}
+  ✓ Kibana
+{{- end }}
+{{- if .Values.logstash.enabled }}
+  ✓ Logstash
+{{- end }}
+{{- if .Values.filebeat.enabled }}
+  ✓ Filebeat
+{{- end }}
+
+To check the status of your deployment:
+  kubectl get pods -n {{ .Values.global.namespace }}
+
+{{- if .Values.kibana.enabled }}
+{{- if .Values.kibana.ingress.enabled }}
+
+To access Kibana:
+{{- range .Values.kibana.ingress.hosts }}
+  http://{{ .host }}
+{{- end }}
+{{- else }}
+
+To access Kibana, port-forward the service:
+  kubectl port-forward -n {{ .Values.global.namespace }} svc/kibana {{ .Values.kibana.service.port }}:{{ .Values.kibana.service.port }}
+
+Then access: http://localhost:{{ .Values.kibana.service.port }}
+{{- end }}
+{{- end }}
+
+{{- if .Values.elasticsearch.enabled }}
+
+Elasticsearch credentials:
+  Username: {{ .Values.elasticsearch.security.username }}
+  Password: {{ .Values.elasticsearch.security.password }}
+
+IMPORTANT: Change the default password in production!
+{{- end }}
+
+For more information, visit: https://www.elastic.co/guide/

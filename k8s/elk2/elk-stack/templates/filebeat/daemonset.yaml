@@ -1,0 +1,73 @@
+{{- if .Values.filebeat.enabled }}
+{{- if .Values.filebeat.daemonSet.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: filebeat
+spec:
+  selector:
+    matchLabels:
+      app: filebeat
+  template:
+    metadata:
+      labels:
+        app: filebeat
+    spec:
+      serviceAccountName: {{ .Values.filebeat.serviceAccount.name }}
+      terminationGracePeriodSeconds: {{ .Values.filebeat.daemonSet.terminationGracePeriodSeconds }}
+      hostNetwork: {{ .Values.filebeat.daemonSet.hostNetwork }}
+      dnsPolicy: {{ .Values.filebeat.daemonSet.dnsPolicy }}
+      {{- with .Values.filebeat.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+      containers:
+      - name: filebeat
+        image: {{ .Values.filebeat.image.repository }}:{{ .Values.filebeat.image.tag }}
+        imagePullPolicy: {{ .Values.filebeat.image.pullPolicy }}
+        args: [
+          "-c", "/etc/filebeat.yml",
+          "-e",
+        ]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        securityContext:
+          {{- toYaml .Values.filebeat.securityContext | nindent 10 }}
+        resources:
+          {{- toYaml .Values.filebeat.resources | nindent 10 }}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/filebeat.yml
+          readOnly: true
+          subPath: filebeat.yml
+        - name: data
+          mountPath: /usr/share/filebeat/data
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: varlog
+          mountPath: /var/log
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          defaultMode: 0640
+          name: filebeat-config
+      - name: varlibdockercontainers
+        hostPath:
+          path: {{ .Values.filebeat.volumes.varLibDockerContainers.hostPath }}
+      - name: varlog
+        hostPath:
+          path: {{ .Values.filebeat.volumes.varLog.hostPath }}
+      - name: data
+        hostPath:
+          path: {{ .Values.filebeat.volumes.data.hostPath }}
+          type: DirectoryOrCreate
+{{- end }}
+{{- end }}

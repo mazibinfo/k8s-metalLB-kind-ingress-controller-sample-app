@@ -1,0 +1,26 @@
+{{- if .Values.logstash.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: logstash
+spec:
+  type: {{ .Values.logstash.service.type }}
+  selector:
+    app: logstash
+  ports:
+    - name: beats
+      protocol: TCP
+      port: {{ .Values.logstash.service.beatsPort }}
+      targetPort: {{ .Values.logstash.service.beatsPort }}
+    - name: http
+      protocol: TCP
+      port: {{ .Values.logstash.service.httpPort }}
+      targetPort: {{ .Values.logstash.service.httpPort }}
+    - name: monitoring
+      protocol: TCP
+      port: {{ .Values.logstash.service.monitoringPort }}
+      targetPort: {{ .Values.logstash.service.monitoringPort }}
+{{- end }}

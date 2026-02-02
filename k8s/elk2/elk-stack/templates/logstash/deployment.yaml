@@ -1,0 +1,63 @@
+{{- if .Values.logstash.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: logstash
+spec:
+  replicas: {{ .Values.logstash.replicas }}
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      containers:
+      - name: logstash
+        image: {{ .Values.logstash.image.repository }}:{{ .Values.logstash.image.tag }}
+        imagePullPolicy: {{ .Values.logstash.image.pullPolicy }}
+        ports:
+        - name: beats
+          containerPort: {{ .Values.logstash.service.beatsPort }}
+        - name: http
+          containerPort: {{ .Values.logstash.service.httpPort }}
+        - name: monitoring
+          containerPort: {{ .Values.logstash.service.monitoringPort }}
+        env:
+        - name: LS_JAVA_OPTS
+          value: {{ .Values.logstash.javaOpts | quote }}
+        - name: ELASTIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elastic-credentials
+              key: password
+        resources:
+          {{- toYaml .Values.logstash.resources | nindent 10 }}
+        volumeMounts:
+        - name: config-volume
+          mountPath: /usr/share/logstash/pipeline/logstash.conf
+          subPath: logstash.conf
+        - name: config-volume
+          mountPath: /usr/share/logstash/config/logstash.yml
+          subPath: logstash.yml
+        readinessProbe:
+          httpGet:
+            path: /
+            port: {{ .Values.logstash.service.monitoringPort }}
+          initialDelaySeconds: {{ .Values.logstash.readinessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.logstash.readinessProbe.periodSeconds }}
+        livenessProbe:
+          httpGet:
+            path: /
+            port: {{ .Values.logstash.service.monitoringPort }}
+          initialDelaySeconds: {{ .Values.logstash.livenessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.logstash.livenessProbe.periodSeconds }}
+      volumes:
+      - name: config-volume
+        configMap:
+          name: logstash-config
+{{- end }}

@@ -1,0 +1,299 @@
+# Global settings
+global:
+  namespace: logging
+
+# Elasticsearch configuration
+elasticsearch:
+  enabled: true
+  image:
+    repository: docker.elastic.co/elasticsearch/elasticsearch
+    tag: "8.19.1"
+    pullPolicy: IfNotPresent
+
+  replicas: 1
+
+  # Resources
+  resources:
+    limits:
+      memory: "2Gi"
+      cpu: "1"
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+
+  # Java options
+  javaOpts: "-Xms512m -Xmx512m"
+
+  # Security settings
+  security:
+    enabled: true
+    username: "elastic"
+    password: "changeme123"  # CHANGE THIS in production!
+    http:
+      ssl:
+        enabled: false
+    transport:
+      ssl:
+        enabled: false
+
+  # Storage
+  persistence:
+    enabled: true
+    storageClassName: "standard"
+    size: "2Gi"
+    accessMode: ReadWriteOnce
+
+  # Service
+  service:
+    type: ClusterIP
+    httpPort: 9200
+    transportPort: 9300
+
+  # Probes
+  readinessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+
+  livenessProbe:
+    initialDelaySeconds: 60
+    periodSeconds: 10
+
+# Kibana configuration
+kibana:
+  enabled: true
+  image:
+    repository: docker.elastic.co/kibana/kibana
+    tag: "8.19.1"
+    pullPolicy: IfNotPresent
+
+  replicas: 1
+
+  # Resources
+  resources:
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+
+  # Elasticsearch connection
+  elasticsearch:
+    hosts: "http://elasticsearch:9200"
+
+  # Server configuration
+  server:
+    name: "kibana"
+    host: "0.0.0.0"
+
+  # Service account token (leave empty if using elastic user credentials)
+  serviceAccountToken: ""
+
+  # Encryption keys (generate your own for production!)
+  encryptionKeys:
+    savedObjects: "a7a6311933d3503b89bc2dbc36572c33a6c10925682e591bffcab6911c06786d"
+    security: "b9c145a2d1c3e7f8a4b6d8e9c7f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7"
+    reporting: "c1d3e5f7a9b1c3d5e7f9a1b3c5d7e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3"
+
+  # Service
+  service:
+    type: ClusterIP
+    port: 5601
+
+  # Ingress
+  ingress:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    hosts:
+      - host: kibana.localhost
+        paths:
+          - path: /
+            pathType: Prefix
+
+  # Probes
+  readinessProbe:
+    initialDelaySeconds: 60
+    periodSeconds: 10
+
+  livenessProbe:
+    initialDelaySeconds: 90
+    periodSeconds: 10
+
+# Logstash configuration
+logstash:
+  enabled: true
+  image:
+    repository: docker.elastic.co/logstash/logstash
+    tag: "8.19.1"
+    pullPolicy: IfNotPresent
+
+  replicas: 1
+
+  # Resources
+  resources:
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+
+  # Java options
+  javaOpts: "-Xmx512m -Xms512m"
+
+  # Service
+  service:
+    type: ClusterIP
+    beatsPort: 5044
+    httpPort: 8080
+    monitoringPort: 9600
+
+  # Configuration files
+  config:
+    logstashConf: |
+      input {
+        beats {
+          port => 5044
+        }
+        http {
+          port => 8080
+        }
+      }
+
+      filter {
+        if [type] == "test" {
+          mutate {
+            add_field => { "processed_by" => "logstash" }
+          }
+        }
+      }
+
+      output {
+        # Route to separate indices based on agent type
+        if [agent][type] == "filebeat" {
+          elasticsearch {
+            hosts => ["http://elasticsearch:9200"]
+            user => "elastic"
+            password => "${ELASTIC_PASSWORD}"
+            index => "filebeat-%{+YYYY.MM.dd}"
+          }
+        } else {
+          # Fallback for other sources
+          elasticsearch {
+            hosts => ["http://elasticsearch:9200"]
+            user => "elastic"
+            password => "${ELASTIC_PASSWORD}"
+            index => "logstash-%{+YYYY.MM.dd}"
+          }
+        }
+        # For debugging, also output to stdout
+        stdout {
+          codec => rubydebug
+        }
+      }
+
+    logstashYml: |
+      http.host: "0.0.0.0"
+      path.config: /usr/share/logstash/pipeline/logstash.conf
+      xpack.monitoring.enabled: false
+
+  # Probes
+  readinessProbe:
+    initialDelaySeconds: 60
+    periodSeconds: 10
+
+  livenessProbe:
+    initialDelaySeconds: 90
+    periodSeconds: 10
+
+# Filebeat configuration
+filebeat:
+  enabled: true
+  image:
+    repository: docker.elastic.co/beats/filebeat
+    tag: "8.19.1"
+    pullPolicy: IfNotPresent
+
+  # Resources
+  resources:
+    limits:
+      memory: 200Mi
+      cpu: 100m
+    requests:
+      memory: 100Mi
+      cpu: 50m
+
+  # Security context
+  securityContext:
+    runAsUser: 0
+    capabilities:
+      add:
+        - DAC_READ_SEARCH
+
+  # DaemonSet configuration
+  daemonSet:
+    enabled: true
+    hostNetwork: true
+    dnsPolicy: ClusterFirstWithHostNet
+    terminationGracePeriodSeconds: 30
+
+  # Tolerations for control-plane nodes
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+
+  # RBAC
+  rbac:
+    create: true
+
+  serviceAccount:
+    create: true
+    name: filebeat
+
+  # Configuration
+  config:
+    filebeatYml: |
+      # Filebeat configuration
+      filebeat.inputs:
+      # Container logs - ALL namespaces
+      - type: container
+        enabled: true
+        paths:
+          - /var/log/containers/*.log
+        # Start reading from beginning of files (for historical logs)
+        tail_files: false
+        # Parse container logs
+        processors:
+          - add_kubernetes_metadata:
+              host: ${NODE_NAME}
+              matchers:
+              - logs_path:
+                  logs_path: "/var/log/containers/"
+          # Add cloud metadata
+          - add_cloud_metadata: ~
+          # Add docker metadata
+          - add_docker_metadata: ~
+          # NO FILTERS - collect from ALL namespaces!
+
+      # Output to Logstash
+      output.logstash:
+        hosts: ["logstash.logging.svc.cluster.local:5044"]
+
+      # Logging
+      logging.level: info
+      logging.to_files: false
+      logging.to_stderr: true
+
+  # Volume mounts
+  volumes:
+    varLog:
+      hostPath: /var/log
+    varLibDockerContainers:
+      hostPath: /var/lib/docker/containers
+    data:
+      hostPath: /var/lib/filebeat-data

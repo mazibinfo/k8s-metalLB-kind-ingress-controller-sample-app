@@ -1,0 +1,149 @@
+# Logstash for Production
+
+---
+# Logstash ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: logging
+data:
+  logstash.conf: |
+    input {
+      beats {
+        port => 5044
+      }
+      http {
+        port => 8080
+      }
+    }
+
+    filter {
+      if [type] == "test" {
+        mutate {
+          add_field => { "processed_by" => "logstash" }
+        }
+      }
+    }
+
+    output {
+      # Route to separate indices based on agent type
+      if [agent][type] == "filebeat" {
+        elasticsearch {
+          hosts => ["http://elasticsearch:9200"]
+          user => "elastic"
+          password => "${ELASTIC_PASSWORD}"
+          index => "filebeat-%{+YYYY.MM.dd}"
+        }
+      } else {
+        # Fallback for other sources
+        elasticsearch {
+          hosts => ["http://elasticsearch:9200"]
+          user => "elastic"
+          password => "${ELASTIC_PASSWORD}"
+          index => "logstash-%{+YYYY.MM.dd}"
+        }
+      }
+      # For debugging, also output to stdout
+      stdout {
+        codec => rubydebug
+      }
+    }
+
+  logstash.yml: |
+    http.host: "0.0.0.0"
+    path.config: /usr/share/logstash/pipeline/logstash.conf
+    xpack.monitoring.enabled: false
+---
+# Logstash Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: logging
+  labels:
+    app: logstash
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      containers:
+      - name: logstash
+        image: docker.elastic.co/logstash/logstash:8.19.1
+        ports:
+        - name: beats
+          containerPort: 5044
+        - name: http
+          containerPort: 8080
+        - name: monitoring
+          containerPort: 9600
+        env:
+        - name: LS_JAVA_OPTS
+          value: "-Xmx512m -Xms512m"
+        - name: ELASTIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elastic-credentials
+              key: password
+        resources:
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /usr/share/logstash/pipeline/logstash.conf
+          subPath: logstash.conf
+        - name: config-volume
+          mountPath: /usr/share/logstash/config/logstash.yml
+          subPath: logstash.yml
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 9600
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 9600
+          initialDelaySeconds: 90
+          periodSeconds: 10
+      volumes:
+      - name: config-volume
+        configMap:
+          name: logstash-config
+---
+# Logstash Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: logging
+  labels:
+    app: logstash
+spec:
+  type: ClusterIP
+  selector:
+    app: logstash
+  ports:
+    - name: beats
+      protocol: TCP
+      port: 5044
+      targetPort: 5044
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    - name: monitoring
+      protocol: TCP
+      port: 9600
+      targetPort: 9600

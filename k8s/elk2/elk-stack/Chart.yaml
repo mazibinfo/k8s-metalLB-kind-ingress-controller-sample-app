@@ -1,0 +1,15 @@
+apiVersion: v2
+name: elk-stack
+description: A Helm chart for ELK Stack (Elasticsearch, Logstash, Kibana) with Filebeat
+type: application
+version: 1.0.0
+appVersion: "8.19.1"
+keywords:
+  - elasticsearch
+  - logstash
+  - kibana
+  - filebeat
+  - logging
+  - elk
+maintainers:
+  - name: ELK Stack Team

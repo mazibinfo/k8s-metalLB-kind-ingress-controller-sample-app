@@ -1,0 +1,78 @@
+{{- if .Values.elasticsearch.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: elasticsearch
+spec:
+  replicas: {{ .Values.elasticsearch.replicas }}
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      containers:
+        - name: elasticsearch
+          image: {{ .Values.elasticsearch.image.repository }}:{{ .Values.elasticsearch.image.tag }}
+          imagePullPolicy: {{ .Values.elasticsearch.image.pullPolicy }}
+          env:
+            - name: discovery.type
+              value: single-node
+            - name: ES_JAVA_OPTS
+              value: {{ .Values.elasticsearch.javaOpts | quote }}
+            # Enable security
+            - name: xpack.security.enabled
+              value: {{ .Values.elasticsearch.security.enabled | quote }}
+            # SSL settings
+            - name: xpack.security.http.ssl.enabled
+              value: {{ .Values.elasticsearch.security.http.ssl.enabled | quote }}
+            - name: xpack.security.transport.ssl.enabled
+              value: {{ .Values.elasticsearch.security.transport.ssl.enabled | quote }}
+            # Set elastic user password
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: password
+          ports:
+            - name: http
+              containerPort: {{ .Values.elasticsearch.service.httpPort }}
+            - name: transport
+              containerPort: {{ .Values.elasticsearch.service.transportPort }}
+          resources:
+            {{- toYaml .Values.elasticsearch.resources | nindent 12 }}
+          volumeMounts:
+            - mountPath: /usr/share/elasticsearch/data
+              name: elasticsearch-storage
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  curl -s -u elastic:${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -q '"status":"green\|yellow"'
+            initialDelaySeconds: {{ .Values.elasticsearch.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.elasticsearch.readinessProbe.periodSeconds }}
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  curl -s -u elastic:${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -q '"status":"green\|yellow"'
+            initialDelaySeconds: {{ .Values.elasticsearch.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.elasticsearch.livenessProbe.periodSeconds }}
+      volumes:
+        - name: elasticsearch-storage
+          {{- if .Values.elasticsearch.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: elasticsearch-pvc
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

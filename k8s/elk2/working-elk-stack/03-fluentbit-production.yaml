@@ -1,0 +1,362 @@
+# Fluent Bit for Production
+# Lightweight log processor and forwarder
+# Collects logs from Kubernetes pods and sends to Elasticsearch
+
+---
+# ConfigMap with Fluent Bit configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: logging
+  labels:
+    app: fluent-bit
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Daemon Off
+        Flush 1
+        Log_Level info
+        Parsers_File parsers.conf
+        Parsers_File custom_parsers.conf
+        HTTP_Server On
+        HTTP_Listen 0.0.0.0
+        HTTP_Port 2020
+        Health_Check On
+
+    [INPUT]
+        Name tail
+        Path /var/log/containers/*.log
+        multiline.parser docker, cri
+        Tag kube.*
+        Mem_Buf_Limit 5MB
+        Skip_Long_Lines On
+
+    [INPUT]
+        Name systemd
+        Tag host.*
+        Systemd_Filter _SYSTEMD_UNIT=kubelet.service
+        Read_From_Tail On
+
+    [FILTER]
+        Name kubernetes
+        Match kube.*
+        Kube_URL https://kubernetes.default.svc:443
+        Kube_CA_File /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix kube.var.log.containers.
+        Merge_Log On
+        Keep_Log Off
+        K8S-Logging.Parser On
+        K8S-Logging.Exclude On
+
+    [FILTER]
+        Name modify
+        Match *
+        Add cluster_name kubernetes
+        Add node_name ${NODE_NAME}
+
+    [OUTPUT]
+        Name es
+        Match kube.*
+        Host elasticsearch
+        Port 9200
+        HTTP_User ${ELASTICSEARCH_USERNAME}
+        HTTP_Passwd ${ELASTICSEARCH_PASSWORD}
+        Logstash_Format On
+        Logstash_Prefix fluent-bit
+        Logstash_DateFormat %Y.%m.%d
+        Include_Tag_Key On
+        Tag_Key @tag
+        Retry_Limit 5
+        Suppress_Type_Name On
+        tls Off
+
+    [OUTPUT]
+        Name es
+        Match host.*
+        Host elasticsearch
+        Port 9200
+        HTTP_User ${ELASTICSEARCH_USERNAME}
+        HTTP_Passwd ${ELASTICSEARCH_PASSWORD}
+        Logstash_Format On
+        Logstash_Prefix node
+        Logstash_DateFormat %Y.%m.%d
+        Retry_Limit 5
+        Suppress_Type_Name On
+        tls Off
+
+  custom_parsers.conf: |
+    [PARSER]
+        Name docker_no_time
+        Format json
+        Time_Keep Off
+        Time_Key time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+
+    [PARSER]
+        Name syslog
+        Format regex
+        Regex ^\<(?<pri>[0-9]+)\>(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<host>[^ ]*) (?<ident>[a-zA-Z0-9_\/\.\-]*)(?:\[(?<pid>[0-9]+)\])?(?:[^\:]*\:)? *(?<message>.*)$
+        Time_Key time
+        Time_Format %b %d %H:%M:%S
+---
+# ConfigMap with Elasticsearch index template for Fluent Bit
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-es-template
+  namespace: logging
+  labels:
+    app: fluent-bit
+data:
+  setup-template.sh: |
+    #!/bin/sh
+    set -e
+
+    echo "Waiting for Elasticsearch to be ready..."
+    until curl -s -u "${ELASTICSEARCH_USERNAME}:${ELASTICSEARCH_PASSWORD}" \
+      http://elasticsearch:9200/_cluster/health | grep -q '"status":"green\|yellow"'; do
+      echo "Elasticsearch not ready, waiting 5s..."
+      sleep 5
+    done
+
+    echo "Elasticsearch is ready. Creating index template..."
+
+    curl -X PUT "http://elasticsearch:9200/_index_template/fluent-bit-template" \
+      -u "${ELASTICSEARCH_USERNAME}:${ELASTICSEARCH_PASSWORD}" \
+      -H 'Content-Type: application/json' \
+      -d '{
+        "index_patterns": ["fluent-bit-*"],
+        "priority": 1,
+        "template": {
+          "mappings": {
+            "properties": {
+              "log": {
+                "type": "text",
+                "fields": {
+                  "keyword": {
+                    "type": "keyword",
+                    "ignore_above": 256
+                  }
+                }
+              },
+              "@timestamp": {"type": "date"},
+              "@tag": {
+                "type": "text",
+                "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}
+              },
+              "time": {"type": "date"},
+              "stream": {"type": "keyword"},
+              "kubernetes": {
+                "properties": {
+                  "namespace_name": {"type": "keyword"},
+                  "pod_name": {"type": "keyword"},
+                  "container_name": {"type": "keyword"},
+                  "container_image": {"type": "keyword"},
+                  "host": {"type": "keyword"},
+                  "pod_id": {"type": "keyword"},
+                  "labels": {"type": "object", "enabled": false},
+                  "annotations": {"type": "object", "enabled": false}
+                }
+              },
+              "cluster_name": {"type": "keyword"},
+              "node_name": {"type": "keyword"},
+              "level": {"type": "keyword"}
+            }
+          },
+          "settings": {
+            "index": {
+              "number_of_shards": 1,
+              "number_of_replicas": 1,
+              "refresh_interval": "5s"
+            }
+          }
+        }
+      }'
+
+    echo ""
+    echo "✓ Index template created successfully!"
+---
+# ServiceAccount for Fluent Bit
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  namespace: logging
+  labels:
+    app: fluent-bit
+---
+# ClusterRole for Fluent Bit to access pod logs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit
+  labels:
+    app: fluent-bit
+rules:
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - pods
+      - nodes
+      - nodes/proxy
+    verbs:
+      - get
+      - list
+      - watch
+---
+# ClusterRoleBinding for Fluent Bit
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit
+  labels:
+    app: fluent-bit
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit
+    namespace: logging
+roleRef:
+  kind: ClusterRole
+  name: fluent-bit
+  apiGroup: rbac.authorization.k8s.io
+---
+# Fluent Bit DaemonSet - runs on every node
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: logging
+  labels:
+    app: fluent-bit
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "2020"
+        prometheus.io/path: /api/v1/metrics/prometheus
+    spec:
+      serviceAccountName: fluent-bit
+      terminationGracePeriodSeconds: 10
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      initContainers:
+        # Create Elasticsearch index template before FluentBit starts
+        - name: setup-es-template
+          image: curlimages/curl:8.5.0
+          command: ["/bin/sh", "/scripts/setup-template.sh"]
+          env:
+            - name: ELASTICSEARCH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: username
+            - name: ELASTICSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: password
+          volumeMounts:
+            - name: template-script
+              mountPath: /scripts
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:3.2.2
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 2020
+              protocol: TCP
+          env:
+            - name: ELASTICSEARCH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: username
+            - name: ELASTICSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: password
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            limits:
+              memory: 200Mi
+              cpu: 200m
+            requests:
+              memory: 100Mi
+              cpu: 100m
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/fluent-bit.conf
+              subPath: fluent-bit.conf
+            - name: config
+              mountPath: /fluent-bit/etc/custom_parsers.conf
+              subPath: custom_parsers.conf
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: etcmachineid
+              mountPath: /etc/machine-id
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 2020
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: fluent-bit-config
+        - name: template-script
+          configMap:
+            name: fluent-bit-es-template
+            defaultMode: 0755
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers
+        - name: etcmachineid
+          hostPath:
+            path: /etc/machine-id
+            type: File
+---
+# Service for Fluent Bit metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluent-bit
+  namespace: logging
+  labels:
+    app: fluent-bit
+spec:
+  type: ClusterIP
+  selector:
+    app: fluent-bit
+  ports:
+    - name: http
+      protocol: TCP
+      port: 2020
+      targetPort: http

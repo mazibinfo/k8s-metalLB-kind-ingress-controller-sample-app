@@ -1,0 +1,62 @@
+{{- if .Values.kibana.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: kibana
+spec:
+  replicas: {{ .Values.kibana.replicas }}
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+        - name: kibana
+          image: {{ .Values.kibana.image.repository }}:{{ .Values.kibana.image.tag }}
+          imagePullPolicy: {{ .Values.kibana.image.pullPolicy }}
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: {{ .Values.kibana.elasticsearch.hosts | quote }}
+            - name: SERVER_NAME
+              value: {{ .Values.kibana.server.name | quote }}
+            - name: SERVER_HOST
+              value: {{ .Values.kibana.server.host | quote }}
+            {{- if .Values.kibana.serviceAccountToken }}
+            # Use service account token
+            - name: ELASTICSEARCH_SERVICEACCOUNTTOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kibana-token
+                  key: token
+            {{- end }}
+            # Encryption keys
+            - name: XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY
+              value: {{ .Values.kibana.encryptionKeys.savedObjects | quote }}
+            - name: XPACK_SECURITY_ENCRYPTIONKEY
+              value: {{ .Values.kibana.encryptionKeys.security | quote }}
+            - name: XPACK_REPORTING_ENCRYPTIONKEY
+              value: {{ .Values.kibana.encryptionKeys.reporting | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.kibana.service.port }}
+          resources:
+            {{- toYaml .Values.kibana.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: {{ .Values.kibana.service.port }}
+            initialDelaySeconds: {{ .Values.kibana.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.kibana.readinessProbe.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: {{ .Values.kibana.service.port }}
+            initialDelaySeconds: {{ .Values.kibana.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.kibana.livenessProbe.periodSeconds }}
+{{- end }}

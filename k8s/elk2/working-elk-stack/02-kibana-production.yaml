@@ -1,0 +1,225 @@
+# Kibana for Production
+# Uses service account token from secret
+
+---
+# ServiceAccount for Kibana
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kibana
+  namespace: logging
+  labels:
+    app: kibana
+---
+# Role to allow Kibana to create secrets
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kibana-secret-manager
+  namespace: logging
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
+    resourceNames: ["kibana-token"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+# RoleBinding for Kibana ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kibana-secret-manager
+  namespace: logging
+subjects:
+  - kind: ServiceAccount
+    name: kibana
+    namespace: logging
+roleRef:
+  kind: Role
+  name: kibana-secret-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+# ConfigMap with Kibana token setup script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kibana-setup-script
+  namespace: logging
+  labels:
+    app: kibana
+data:
+  setup-token.sh: |
+    #!/bin/sh
+    set -e
+
+    echo "Waiting for Elasticsearch to be ready..."
+    until curl -s -u "elastic:${ELASTIC_PASSWORD}" \
+      http://elasticsearch:9200/_cluster/health | grep -q '"status":"green\|yellow"'; do
+      echo "Elasticsearch not ready, waiting 5s..."
+      sleep 5
+    done
+
+    echo "Elasticsearch is ready!"
+
+    # Check if secret already exists
+    if kubectl get secret kibana-token -n logging >/dev/null 2>&1; then
+      echo "✓ Secret 'kibana-token' already exists, skipping creation"
+      exit 0
+    fi
+
+    echo "Creating Kibana service account token in Elasticsearch..."
+
+    # Create the service account token
+    response=$(curl -s -X POST \
+      -u "elastic:${ELASTIC_PASSWORD}" \
+      "http://elasticsearch:9200/_security/service/elastic/kibana/credential/token/kibana-token" 2>&1)
+
+    # Extract token value
+    TOKEN=$(echo "$response" | grep -o '"value":"[^"]*"' | cut -d'"' -f4)
+
+    if [ -z "$TOKEN" ]; then
+      echo "✗ Failed to create token in Elasticsearch"
+      echo "Response: $response"
+      exit 1
+    fi
+
+    echo "✓ Token created in Elasticsearch: ${TOKEN:0:50}..."
+
+    # Create Kubernetes secret with the token
+    echo "Creating Kubernetes secret 'kibana-token'..."
+
+    kubectl create secret generic kibana-token \
+      --from-literal=token="$TOKEN" \
+      --namespace=logging
+
+    if [ $? -eq 0 ]; then
+      echo "✓ Kubernetes secret 'kibana-token' created successfully!"
+    else
+      echo "✗ Failed to create Kubernetes secret"
+      exit 1
+    fi
+---
+# Kibana Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: logging
+  labels:
+    app: kibana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      serviceAccountName: kibana
+      initContainers:
+        # Create Kibana service account token before Kibana starts
+        - name: setup-kibana-token
+          image: alpine/k8s:1.34.0
+          command: ["/bin/sh", "/scripts/setup-token.sh"]
+          env:
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: password
+          volumeMounts:
+            - name: setup-script
+              mountPath: /scripts
+      containers:
+        - name: kibana
+          image: docker.elastic.co/kibana/kibana:8.19.1
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: "http://elasticsearch:9200"
+            - name: SERVER_NAME
+              value: "kibana"
+            - name: SERVER_HOST
+              value: "0.0.0.0"
+            # Use service account token
+            - name: ELASTICSEARCH_SERVICEACCOUNTTOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kibana-token
+                  key: token
+            # Encryption keys (generate your own for production!)
+            - name: XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY
+              value: "a7a6311933d3503b89bc2dbc36572c33a6c10925682e591bffcab6911c06786d"
+            - name: XPACK_SECURITY_ENCRYPTIONKEY
+              value: "b9c145a2d1c3e7f8a4b6d8e9c7f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7"
+            - name: XPACK_REPORTING_ENCRYPTIONKEY
+              value: "c1d3e5f7a9b1c3d5e7f9a1b3c5d7e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3"
+          ports:
+            - name: http
+              containerPort: 5601
+          resources:
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 5601
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: 5601
+            initialDelaySeconds: 90
+            periodSeconds: 10
+      volumes:
+        - name: setup-script
+          configMap:
+            name: kibana-setup-script
+            defaultMode: 0755
+---
+# Kibana Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: logging
+  labels:
+    app: kibana
+spec:
+  type: ClusterIP
+  selector:
+    app: kibana
+  ports:
+    - name: http
+      protocol: TCP
+      port: 5601
+      targetPort: 5601
+---
+# Kibana Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kibana-ingress
+  namespace: logging
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  rules:
+    - host: kibana.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kibana
+                port:
+                  number: 5601
